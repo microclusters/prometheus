@@ -117,10 +117,8 @@ func FromQuery(req *prompb.Query) (int64, int64, []*labels.Matcher, error) {
 	return req.StartTimestampMs, req.EndTimestampMs, matchers, nil
 }
 
-const remoteReadSampleLimit = 2e7 // 20M * 16bytes = 320MB
-
 // ToQueryResult builds a QueryResult proto.
-func ToQueryResult(ss storage.SeriesSet) (*prompb.QueryResult, error) {
+func ToQueryResult(ss storage.SeriesSet, sampleLimit int) (*prompb.QueryResult, error) {
 	numSamples := 0
 	resp := &prompb.QueryResult{}
 	for ss.Next() {
@@ -130,7 +128,7 @@ func ToQueryResult(ss storage.SeriesSet) (*prompb.QueryResult, error) {
 
 		for iter.Next() {
 			numSamples += 1
-			if numSamples > remoteReadSampleLimit {
+			if numSamples > sampleLimit {
 				return nil, fmt.Errorf("too many samples")
 			}
 			ts, val := iter.At()

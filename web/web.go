@@ -169,6 +169,7 @@ type Options struct {
 	ConsoleLibrariesPath string
 	EnableLifecycle      bool
 	EnableAdminAPI       bool
+	RemoteReadLimit      int
 }
 
 func instrumentHandler(handlerName string, handler http.HandlerFunc) http.HandlerFunc {
@@ -227,6 +228,7 @@ func New(logger log.Logger, o *Options) *Handler {
 		h.testReady,
 		h.options.TSDB,
 		h.options.EnableAdminAPI,
+		h.options.RemoteReadLimit,
 	)
 
 	if o.RoutePrefix != "/" {
