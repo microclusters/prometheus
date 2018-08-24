@@ -165,7 +165,7 @@ func main() {
 		Default("1m").PlaceHolder("<duration>").SetValue(&cfg.RemoteFlushDeadline)
 
 	a.Flag("storage.remote.read-sample-limit", "Maximum number of samples to return via the remote read interface, in a single query.  0 means no limit.").
-		Default("6e7").IntVar(&cfg.web.RemoteReadLimit)
+		Default("5e7").IntVar(&cfg.web.RemoteReadLimit)
 
 	a.Flag("alertmanager.notification-queue-capacity", "The capacity of the queue for pending Alertmanager notifications.").
 		Default("10000").IntVar(&cfg.notifier.QueueCapacity)
