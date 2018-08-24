@@ -28,6 +28,19 @@ import (
 	"github.com/prometheus/prometheus/storage"
 )
 
+type HTTPError struct {
+	msg    string
+	status int
+}
+
+func (e HTTPError) Error() string {
+	return e.msg
+}
+
+func (e HTTPError) Status() int {
+	return e.status
+}
+
 // DecodeReadRequest reads a remote.Request from a http.Request.
 func DecodeReadRequest(r *http.Request) (*prompb.ReadRequest, error) {
 	compressed, err := ioutil.ReadAll(r.Body)
@@ -128,8 +141,11 @@ func ToQueryResult(ss storage.SeriesSet, sampleLimit int) (*prompb.QueryResult, 
 
 		for iter.Next() {
 			numSamples += 1
-			if numSamples > sampleLimit {
-				return nil, fmt.Errorf("too many samples")
+			if sampleLimit > 0 && numSamples > sampleLimit {
+				return nil, HTTPError{
+					msg:    fmt.Sprintf("exceeded sample limit (%d)", sampleLimit),
+					status: http.StatusRequestEntityTooLarge,
+				}
 			}
 			ts, val := iter.At()
 			samples = append(samples, &prompb.Sample{

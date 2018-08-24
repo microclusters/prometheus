@@ -578,7 +578,11 @@ func (api *API) remoteRead(w http.ResponseWriter, r *http.Request) {
 		}
 		resp.Results[i], err = remote.ToQueryResult(set, api.remoteReadLimit)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			if httpErr, ok := err.(remote.HTTPError); ok {
+				http.Error(w, httpErr.Error(), httpErr.Status())
+			} else {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 			return
 		}
 
