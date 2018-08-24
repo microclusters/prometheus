@@ -164,8 +164,8 @@ func main() {
 	a.Flag("storage.remote.flush-deadline", "How long to wait flushing sample on shutdown or config reload.").
 		Default("1m").PlaceHolder("<duration>").SetValue(&cfg.RemoteFlushDeadline)
 
-	a.Flag("storage.remote.read-sample-limit", "Maxium number of samples to return via the remote read interface, in a single query.").
-		Default("20m").IntVar(&cfg.web.RemoteReadLimit)
+	a.Flag("storage.remote.read-sample-limit", "Maximum number of samples to return via the remote read interface, in a single query.").
+		Default("2e7").IntVar(&cfg.web.RemoteReadLimit)
 
 	a.Flag("alertmanager.notification-queue-capacity", "The capacity of the queue for pending Alertmanager notifications.").
 		Default("10000").IntVar(&cfg.notifier.QueueCapacity)
