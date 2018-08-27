@@ -13,6 +13,8 @@ jobs:
     steps:
     - checkout
     - run: |
+          set -eu
+          sudo apt install -y rsync
           ssh-keyscan farm.yourbase.io >> ~/.ssh/known_hosts
           rsync -e 'ssh -o BatchMode=yes' -L microclusters@farm.yourbase.io:/rembuild rembuild
           ./rembuild script
