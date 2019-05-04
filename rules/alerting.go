@@ -17,6 +17,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
+	"github.com/pkg/errors"
 	"github.com/prometheus/common/model"
 
 	"github.com/prometheus/prometheus/pkg/labels"
@@ -71,7 +73,7 @@ func (s AlertState) String() string {
 	case StateFiring:
 		return "firing"
 	}
-	panic(fmt.Errorf("unknown alert state: %v", s.String()))
+	panic(errors.Errorf("unknown alert state: %s", s.String()))
 }
 
 // Alert is the user-level representation of a single instance of an alerting rule.
@@ -89,6 +91,7 @@ type Alert struct {
 	FiredAt    time.Time
 	ResolvedAt time.Time
 	LastSentAt time.Time
+	ValidUntil time.Time
 }
 
 func (a *Alert) needsSending(ts time.Time, resendDelay time.Duration) bool {
@@ -117,13 +120,17 @@ type AlertingRule struct {
 	labels labels.Labels
 	// Non-identifying key/value pairs.
 	annotations labels.Labels
-	// Time in seconds taken to evaluate rule.
-	evaluationDuration time.Duration
+	// External labels from the global config.
+	externalLabels map[string]string
 	// true if old state has been restored. We start persisting samples for ALERT_FOR_STATE
 	// only after the restoration.
 	restored bool
 	// Protects the below.
 	mtx sync.Mutex
+	// Time in seconds taken to evaluate rule.
+	evaluationDuration time.Duration
+	// Timestamp of last evaluation of rule.
+	evaluationTimestamp time.Time
 	// The health of the alerting rule.
 	health RuleHealth
 	// The last error seen by the alerting rule.
@@ -136,17 +143,27 @@ type AlertingRule struct {
 }
 
 // NewAlertingRule constructs a new AlertingRule.
-func NewAlertingRule(name string, vec promql.Expr, hold time.Duration, lbls, anns labels.Labels, restored bool, logger log.Logger) *AlertingRule {
+func NewAlertingRule(
+	name string, vec promql.Expr, hold time.Duration,
+	labels, annotations, externalLabels labels.Labels,
+	restored bool, logger log.Logger,
+) *AlertingRule {
+	el := make(map[string]string, len(externalLabels))
+	for _, lbl := range externalLabels {
+		el[lbl.Name] = lbl.Value
+	}
+
 	return &AlertingRule{
-		name:         name,
-		vector:       vec,
-		holdDuration: hold,
-		labels:       lbls,
-		annotations:  anns,
-		health:       HealthUnknown,
-		active:       map[uint64]*Alert{},
-		logger:       logger,
-		restored:     restored,
+		name:           name,
+		vector:         vec,
+		holdDuration:   hold,
+		labels:         labels,
+		annotations:    annotations,
+		externalLabels: el,
+		health:         HealthUnknown,
+		active:         map[uint64]*Alert{},
+		logger:         logger,
+		restored:       restored,
 	}
 }
 
@@ -203,10 +220,6 @@ func (r *AlertingRule) Annotations() labels.Labels {
 	return r.annotations
 }
 
-func (r *AlertingRule) equal(o *AlertingRule) bool {
-	return r.name == o.name && labels.Equal(r.labels, o.labels)
-}
-
 func (r *AlertingRule) sample(alert *Alert, ts time.Time) promql.Sample {
 	lb := labels.NewBuilder(r.labels)
 
@@ -257,6 +270,20 @@ func (r *AlertingRule) GetEvaluationDuration() time.Duration {
 	return r.evaluationDuration
 }
 
+// SetEvaluationTimestamp updates evaluationTimestamp to the timestamp of when the rule was last evaluated.
+func (r *AlertingRule) SetEvaluationTimestamp(ts time.Time) {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+	r.evaluationTimestamp = ts
+}
+
+// GetEvaluationTimestamp returns the time the evaluation took place.
+func (r *AlertingRule) GetEvaluationTimestamp() time.Time {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+	return r.evaluationTimestamp
+}
+
 // SetRestored updates the restoration state of the alerting rule.
 func (r *AlertingRule) SetRestored(restored bool) {
 	r.restored = restored
@@ -291,21 +318,19 @@ func (r *AlertingRule) Eval(ctx context.Context, ts time.Time, query QueryFunc, 
 			l[lbl.Name] = lbl.Value
 		}
 
-		tmplData := struct {
-			Labels map[string]string
-			Value  float64
-		}{
-			Labels: l,
-			Value:  smpl.V,
-		}
+		tmplData := template.AlertTemplateData(l, r.externalLabels, smpl.V)
 		// Inject some convenience variables that are easier to remember for users
 		// who are not used to Go's templating system.
-		defs := "{{$labels := .Labels}}{{$value := .Value}}"
+		defs := []string{
+			"{{$labels := .Labels}}",
+			"{{$externalLabels := .ExternalLabels}}",
+			"{{$value := .Value}}",
+		}
 
 		expand := func(text string) string {
 			tmpl := template.NewTemplateExpander(
 				ctx,
-				defs+text,
+				strings.Join(append(defs, text), ""),
 				"__alert_"+r.Name(),
 				tmplData,
 				model.Time(timestamp.FromTime(ts)),
@@ -440,11 +465,17 @@ func (r *AlertingRule) ForEachActiveAlert(f func(*Alert)) {
 	}
 }
 
-func (r *AlertingRule) sendAlerts(ctx context.Context, ts time.Time, resendDelay time.Duration, notifyFunc NotifyFunc) {
-	alerts := make([]*Alert, 0)
+func (r *AlertingRule) sendAlerts(ctx context.Context, ts time.Time, resendDelay time.Duration, interval time.Duration, notifyFunc NotifyFunc) {
+	alerts := []*Alert{}
 	r.ForEachActiveAlert(func(alert *Alert) {
 		if alert.needsSending(ts, resendDelay) {
 			alert.LastSentAt = ts
+			// Allow for a couple Eval or Alertmanager send failures
+			delta := resendDelay
+			if interval > resendDelay {
+				delta = interval
+			}
+			alert.ValidUntil = ts.Add(3 * delta)
 			anew := *alert
 			alerts = append(alerts, &anew)
 		}
@@ -463,7 +494,7 @@ func (r *AlertingRule) String() string {
 
 	byt, err := yaml.Marshal(ar)
 	if err != nil {
-		return fmt.Sprintf("error marshalling alerting rule: %s", err.Error())
+		return fmt.Sprintf("error marshaling alerting rule: %s", err.Error())
 	}
 
 	return string(byt)
@@ -478,27 +509,27 @@ func (r *AlertingRule) HTMLSnippet(pathPrefix string) html_template.HTML {
 		alertNameLabel:        model.LabelValue(r.name),
 	}
 
-	labels := make(map[string]string, len(r.labels))
+	labelsMap := make(map[string]string, len(r.labels))
 	for _, l := range r.labels {
-		labels[l.Name] = html_template.HTMLEscapeString(l.Value)
+		labelsMap[l.Name] = html_template.HTMLEscapeString(l.Value)
 	}
 
-	annotations := make(map[string]string, len(r.annotations))
+	annotationsMap := make(map[string]string, len(r.annotations))
 	for _, l := range r.annotations {
-		annotations[l.Name] = html_template.HTMLEscapeString(l.Value)
+		annotationsMap[l.Name] = html_template.HTMLEscapeString(l.Value)
 	}
 
 	ar := rulefmt.Rule{
 		Alert:       fmt.Sprintf("<a href=%q>%s</a>", pathPrefix+strutil.TableLinkForExpression(alertMetric.String()), r.name),
 		Expr:        fmt.Sprintf("<a href=%q>%s</a>", pathPrefix+strutil.TableLinkForExpression(r.vector.String()), html_template.HTMLEscapeString(r.vector.String())),
 		For:         model.Duration(r.holdDuration),
-		Labels:      labels,
-		Annotations: annotations,
+		Labels:      labelsMap,
+		Annotations: annotationsMap,
 	}
 
 	byt, err := yaml.Marshal(ar)
 	if err != nil {
-		return html_template.HTML(fmt.Sprintf("error marshalling alerting rule: %q", html_template.HTMLEscapeString(err.Error())))
+		return html_template.HTML(fmt.Sprintf("error marshaling alerting rule: %q", html_template.HTMLEscapeString(err.Error())))
 	}
 	return html_template.HTML(byt)
 }
