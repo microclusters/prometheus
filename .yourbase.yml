@@ -1,0 +1,19 @@
+dependencies:
+  build:
+    - go:1.12.2  
+ci:
+  builds:
+    - name: test_ci
+      build_target: default
+build_targets:
+  - name: default
+    commands:
+      - make deps
+      - make check_license
+      - make style
+      - make unused
+      - make test
+      - make lint
+      - make check_assets
+    tags:
+      channel: experimental
